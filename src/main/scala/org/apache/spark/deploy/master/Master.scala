@@ -484,6 +484,7 @@ private[spark] class Master(
     }
   }
 
+  //完成master的恢复（master主备切换）
   def completeRecovery() {
     // Ensure "only-once" recovery semantics using a short synchronization period.
     synchronized {
@@ -491,6 +492,7 @@ private[spark] class Master(
       state = RecoveryState.COMPLETING_RECOVERY
     }
 
+    //清理机制：1、从内存缓存结构中移除 2、从相关的组件内存缓存中移除 3、从持久化存储中移除
     // Kill off any workers and apps that didn't respond to us.
     workers.filter(_.state == WorkerState.UNKNOWN).foreach(removeWorker)
     apps.filter(_.state == ApplicationState.UNKNOWN).foreach(finishApplication)
