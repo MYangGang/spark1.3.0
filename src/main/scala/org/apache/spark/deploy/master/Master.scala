@@ -554,28 +554,48 @@ private[spark] class Master(
    * every time a new app joins or resource availability changes.
    */
   private def schedule() {
+    //首先判断，master状态不是ALIVE的话，直接返回
+    //也就是说，standby master是不会进行application等资源调度的
     if (state != RecoveryState.ALIVE) { return }
 
     // First schedule drivers, they take strict precedence over applications
     // Randomization helps balance drivers
+
+    //Random.shuffle原理，对传入的集合的元素进行随机的打乱
+    //取出workers中的所有之前注册上来的worker，进行过滤，必须是状态为ALIVE的worker
     val shuffledAliveWorkers = Random.shuffle(workers.toSeq.filter(_.state == WorkerState.ALIVE))
     val numWorkersAlive = shuffledAliveWorkers.size
     var curPos = 0
 
+    //首先调度driver
+    //只有用yarn-cluster模式提交的时候，才会注册driver；因为yarn-client和standalone模式都是在本地启动driver
+    //不会来注册driver，就更不可能让master来调度driver了
+    //driver的调度机制
+    //遍历waitingDrivers ArrayBuffer
     for (driver <- waitingDrivers.toList) { // iterate over a copy of waitingDrivers
       // We assign workers to each waiting driver in a round-robin fashion. For each driver, we
       // start from the last worker that was assigned a driver, and continue onwards until we have
       // explored all alive workers.
       var launched = false
       var numWorkersVisited = 0
+
+      //while条件：numWorkersVisited小于numWorkersAlive
+      //也就是说，只要还有活着的worker没有遍历到，那么就继续进行遍历
+      //并且这个driver还没有被启动，也就是lauched是false
       while (numWorkersVisited < numWorkersAlive && !launched) {
         val worker = shuffledAliveWorkers(curPos)
         numWorkersVisited += 1
+
+        //如果当前这个worker的空闲内存量大于等于，driver需要的内存量
+        //并且worker的空闲cpu数量大于等于，driver需要的cpu数量
         if (worker.memoryFree >= driver.desc.mem && worker.coresFree >= driver.desc.cores) {
+          //启动driver
           launchDriver(worker, driver)
+          //并且将driver从waitingDrivers中移除
           waitingDrivers -= driver
           launched = true
         }
+        //将指针指向下一个worker
         curPos = (curPos + 1) % numWorkersAlive
       }
     }
@@ -861,11 +881,17 @@ private[spark] class Master(
     new DriverInfo(now, newDriverId(date), desc, date)
   }
 
+  //在某一个worker上，启动driver
   def launchDriver(worker: WorkerInfo, driver: DriverInfo) {
     logInfo("Launching driver " + driver.id + " on worker " + worker.id)
+    //将driver加到worker内存缓存结构
+    //将worker内使用的内存和cpu数量，都加上driver需要的内存和cpu数量
     worker.addDriver(driver)
+    //同时也把worker加入到driver的内存缓存中
     driver.worker = Some(worker)
+    //然后调用worker的actor，给它发送LaunchDriver消息，让worker来启动driver
     worker.actor ! LaunchDriver(driver.id, driver.desc)
+    //将driver的状态设置为RUUNING
     driver.state = DriverState.RUNNING
   }
 
