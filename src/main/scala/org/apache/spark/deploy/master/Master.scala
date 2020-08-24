@@ -311,40 +311,63 @@ private[spark] class Master(
       }
     }
 
+      /**
+       * 处理Application注册的请求
+       */
     case RegisterApplication(description) => {
       if (state == RecoveryState.STANDBY) {
         // ignore, don't send response
       } else {
         logInfo("Registering app " + description.name)
+
+        //用applicationDescription创建ApplicationInfo
         val app = createApplication(description, sender)
+
+        //将app信息加入内存缓存中，将app加入等待调度的队列----waitingApps
         registerApplication(app)
         logInfo("Registered app " + description.name + " with ID " + app.id)
+
+        //使用持久化引擎，将applicationInfo进行持久化
         persistenceEngine.addApplication(app)
+
+        //反向，向SparkDeploySchedulerBackend中的AppClient中的ClientActor，发送消息RegisteredApplication
         sender ! RegisteredApplication(app.id, masterUrl)
         schedule()
       }
     }
 
     case ExecutorStateChanged(appId, execId, state, message, exitStatus) => {
+      //找到executor对应的app，然后再反过来通过app内部的executors缓存获取executor信息
       val execOption = idToApp.get(appId).flatMap(app => app.executors.get(execId))
       execOption match {
+        //如果有值
         case Some(exec) => {
+          //设置executor状态
           val appInfo = idToApp(appId)
           exec.state = state
           if (state == ExecutorState.RUNNING) { appInfo.resetRetryCount() }
+          //向driver同步发送ExecutorUpdated消息
           exec.application.driver ! ExecutorUpdated(execId, state, message, exitStatus)
+          //判断，如果executor完成了
           if (ExecutorState.isFinished(state)) {
             // Remove this executor from the worker and app
             logInfo(s"Removing executor ${exec.fullId} because it is $state")
+            //从app缓存中移除executor
             appInfo.removeExecutor(exec)
+            //从运行executor的worker的缓存中移除executor
             exec.worker.removeExecutor(exec)
 
+            //判断executor的退出状态是非正常的
             val normalExit = exitStatus == Some(0)
             // Only retry certain number of times so we don't go into an infinite loop.
             if (!normalExit) {
+              //判断applicationInfo当前的重试次数，是否达到了最大值
               if (appInfo.incrementRetryCount() < ApplicationState.MAX_NUM_RETRY) {
+                //重新进行调度
                 schedule()
               } else {
+                //否则就进行removeApplication操作
+                //也就是说，executor反复调度都是失败，那么就认为application也失败了
                 val execs = appInfo.executors.values
                 if (!execs.exists(_.state == ExecutorState.RUNNING)) {
                   logError(s"Application ${appInfo.desc.name} with ID ${appInfo.id} failed " +
@@ -362,6 +385,8 @@ private[spark] class Master(
 
     case DriverStateChanged(driverId, state, exception) => {
       state match {
+        //如果driver的状态是错误、完成、被杀掉、失败
+        //就移除driver
         case DriverState.ERROR | DriverState.FINISHED | DriverState.KILLED | DriverState.FAILED =>
           removeDriver(driverId, state, exception)
         case _ =>
@@ -680,10 +705,14 @@ private[spark] class Master(
     }
 
     applicationMetricsSystem.registerSource(app.appSource)
+
+    //将app信息加入内存缓存中
     apps += app
     idToApp(app.id) = app
     actorToApp(app.driver) = app
     addressToApp(appAddress) = app
+
+    //将app加入等待调度的队列----waitingApps
     waitingApps += app
   }
 
@@ -841,19 +870,31 @@ private[spark] class Master(
   }
 
   def removeDriver(driverId: String, finalState: DriverState, exception: Option[Exception]) {
+    //用scala的find()高阶函数,找到driverId对应的driver
     drivers.find(d => d.id == driverId) match {
+      //如果找到了，Some，样例类（Option）
       case Some(driver) =>
         logInfo(s"Removing driver: $driverId")
+        //将driver从内存缓存中移除
         drivers -= driver
         if (completedDrivers.size >= RETAINED_DRIVERS) {
           val toRemove = math.max(RETAINED_DRIVERS / 10, 1)
           completedDrivers.trimStart(toRemove)
         }
+
+        //向completedDrivers加入driver
         completedDrivers += driver
+
+        //使用持久化引擎去除driver的持久化信息
         persistenceEngine.removeDriver(driver)
+
+        //设置driver的state、execption
         driver.state = finalState
         driver.exception = exception
+
+        //将driver所在的worker，移除driver
         driver.worker.foreach(w => w.removeDriver(driver))
+
         schedule()
       case None =>
         logWarning(s"Asked to remove unknown driver: $driverId")
