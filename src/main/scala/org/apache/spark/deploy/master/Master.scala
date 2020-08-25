@@ -545,6 +545,7 @@ private[spark] class Master(
    * launched an executor for the app on it (right now the standalone backend doesn't like having
    * two executors on the same worker).
    */
+  //可以被app使用的worker
   def canUse(app: ApplicationInfo, worker: WorkerInfo): Boolean = {
     worker.memoryFree >= app.desc.memoryPerSlave && !worker.hasExecutor(app)
   }
@@ -602,33 +603,70 @@ private[spark] class Master(
 
     // Right now this is a very simple FIFO scheduler. We keep trying to fit in the first app
     // in the queue, then the second app, etc.
+
+    //Application调度机制
+    //Application调度机制有两种：spreadOutApps和非spreadOutApps
     if (spreadOutApps) {
       // Try to spread out each app among all the nodes, until it has all its cores
+
+      //遍历waitingpps中的ApplicationInfo，并且过滤出还有需要调度core的Applciation
       for (app <- waitingApps if app.coresLeft > 0) {
+        //从workers中，过滤出状态为ALIVE的worker，再次过滤出可以被Application使用的worker，
+        //然后按照worker剩余cpu数量倒序排序
         val usableWorkers = workers.toArray.filter(_.state == WorkerState.ALIVE)
           .filter(canUse(app, _)).sortBy(_.coresFree).reverse
         val numUsable = usableWorkers.length
+
+        //创建一个空数组，存储了要分配给每个worker的cpu数量
         val assigned = new Array[Int](numUsable) // Number of cores to give on each node
+
+        //获取到底要分配多少cpu，取app剩余要分配的cpu的数量和worker总共可用cpu数量的最小值
         var toAssign = math.min(app.coresLeft, usableWorkers.map(_.coresFree).sum)
+
+        //通过这种算法，其实会将每个Application，要启动的executor，都平均分布到各个worker上
+        //比如有20个cpu core要分配，10个worker，那么实际会循环两遍worker，每次循环，给每个worker分配1个core
+        //最后每个worker分配了2个core
+
+        //while条件，只要分配的cpu，还没有分配完，就继续分配（循环）
         var pos = 0
         while (toAssign > 0) {
+          //每一个worker，如果空闲的cpu数量大于已经分配出去的cpu数量
+          //也就是说，worker还有可分配的cpu
           if (usableWorkers(pos).coresFree - assigned(pos) > 0) {
+            //将总共要分配的cpu数量-1，因为这里已经决定在这个worker上分配一个cpu了
             toAssign -= 1
+            //给这个worker分配的cpu数量+1
             assigned(pos) += 1
           }
+          //将指针指向下一个worker
           pos = (pos + 1) % numUsable
         }
         // Now that we've decided how many cores to give on each node, let's actually give them
+
+        //给每个worker分配完application要求的cpu core后
+        //遍历worker
         for (pos <- 0 until numUsable) {
+          //只要判断之前给这个worker分配到了core
           if (assigned(pos) > 0) {
+            //首先，在application内部缓存结构中，添加executor
+            //并且创建ExecutorDesc对象，其中封装了，给这个executor分配多少个cpu core
+            //spark 1.3.0 executor启动的内部机制
+            //在spark-submit脚本中，可以指定要多少个executor，每个executor多少个cpu core，多少内存
+            //那么基于我们的机制，实际上，最后，executor的数量，以及每个executor的cpu，可能与配置是不一样的
+            //因为，我们这里是基于总的cpu数量来分配的，就是说，比如要求3个executor，每个要3个cpu，那么比如，有
+            //9个worker，每个有1个cpu，那么其实总共知道，要分配9个core，其实根据这种算法，会给每个worker分配1个
+            //core，然后给每个worker启动1个executor
+            //最后会启动9个executor，每个executor有1个cpu core
             val exec = app.addExecutor(usableWorkers(pos), assigned(pos))
+            //在worker上启动executor
             launchExecutor(usableWorkers(pos), exec)
+            //将application状态设置为RUNNING
             app.state = ApplicationState.RUNNING
           }
         }
       }
     } else {
-      // Pack each app into as few nodes as possible until we've assigned all its cores
+      // Pack each app into as few nodes as possibl每个e until we've assigned all its cores
       for (worker <- workers if worker.coresFree > 0 && worker.state == WorkerState.ALIVE) {
         for (app <- waitingApps if app.coresLeft > 0) {
           if (canUse(app, worker)) {
@@ -646,9 +684,12 @@ private[spark] class Master(
 
   def launchExecutor(worker: WorkerInfo, exec: ExecutorDesc) {
     logInfo("Launching executor " + exec.fullId + " on worker " + worker.id)
+    //将executor加入worker内部缓存
     worker.addExecutor(exec)
+    //向worker的actor发送LaunchExecutor消息
     worker.actor ! LaunchExecutor(masterUrl,
       exec.application.id, exec.id, exec.application.desc, exec.cores, exec.memory)
+    //向executor对应的applciation的driver发送ExecutorAdded消息
     exec.application.driver ! ExecutorAdded(
       exec.id, worker.id, worker.hostPort, exec.cores, exec.memory)
   }
