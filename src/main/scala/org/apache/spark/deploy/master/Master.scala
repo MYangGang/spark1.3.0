@@ -667,13 +667,24 @@ private[spark] class Master(
       }
     } else {
       // Pack each app into as few nodes as possibl每个e until we've assigned all its cores
+
+      //非spreadOUtApps模式
+
+      //将每一个Application，尽可能少的分配到worker上去
+      //首先遍历worker，并且状态时ALIVE,还有空闲cpu的worker
       for (worker <- workers if worker.coresFree > 0 && worker.state == WorkerState.ALIVE) {
+        //遍历Application，并且是还有需要分配的core的Application
         for (app <- waitingApps if app.coresLeft > 0) {
+          //判断，如果当前的这个worker可以被applciaton使用
           if (canUse(app, worker)) {
+            //取worker的剩余的cpu数量，与app要分配的cpu数量最小值
             val coresToUse = math.min(worker.coresFree, app.coresLeft)
             if (coresToUse > 0) {
+              //给app添加一个executor
               val exec = app.addExecutor(worker, coresToUse)
+              //在worker上启动executor
               launchExecutor(worker, exec)
+              //将application状态设置为RUNNING
               app.state = ApplicationState.RUNNING
             }
           }
