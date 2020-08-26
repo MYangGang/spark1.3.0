@@ -669,6 +669,12 @@ private[spark] class Master(
       // Pack each app into as few nodes as possibl每个e until we've assigned all its cores
 
       //非spreadOUtApps模式
+      //这种算法与spreadOutApps算法正好相反
+      //每一个Application，尽可能少的分配到worker上去。比如总共有10个worker，每个有10个core
+      //app总共要分配20个core，那么其实，只会分配到两个worker上，每个worker都占满10个core
+      //那么，其余的app只能分配到下一个worker上了
+      //比如说，application spark-submit里，配置了10个executor，每个要2个core，那么总共要分配20个core
+      //但是在这种算法下，只会启动2个executor，每个executor都10个core
 
       //将每一个Application，尽可能少的分配到worker上去
       //首先遍历worker，并且状态时ALIVE,还有空闲cpu的worker
