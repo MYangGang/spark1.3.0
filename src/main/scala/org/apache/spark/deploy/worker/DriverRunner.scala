@@ -37,6 +37,8 @@ import org.apache.spark.util.{Clock, SystemClock}
  * Manages the execution of one driver, including automatically restarting the driver on failure.
  * This is currently only used in standalone cluster deploy mode.
  */
+
+//管理driver的执行，包括在driver失败时自动重启driver。目前，这种方式仅仅使用于standalone集群部署模式
 private[spark] class DriverRunner(
     val conf: SparkConf,
     val driverId: String,
@@ -65,10 +67,16 @@ private[spark] class DriverRunner(
 
   /** Starts a thread to run and manage the driver. */
   def start() = {
+    //DriverRunner机制剖析
+
+    //启动一个java的线程
     new Thread("DriverRunner for " + driverId) {
       override def run() {
         try {
+          //第一步，创建driver的工作目录
           val driverDir = createWorkingDirectory()
+          //第二步，下载用户上传的jar（我们编写的spark应用程序，如果是java，用maven打个jar包，如果是scala，
+          // 那么用export将它导出为jar包）
           val localJarFilename = downloadUserJar(driverDir)
 
           def substituteVariables(argument: String): String = argument match {
@@ -78,14 +86,19 @@ private[spark] class DriverRunner(
           }
 
           // TODO: If we add ability to submit multiple jars they should also be added here
+
+          //构建ProcessBuilder
+          //传入了driver的启动命令、需要的内存大小等信息
           val builder = CommandUtils.buildProcessBuilder(driverDesc.command, driverDesc.mem,
             sparkHome.getAbsolutePath, substituteVariables)
+          //通过ProcesBuilder启动Driver进程
           launchDriver(builder, driverDir, driverDesc.supervise)
         }
         catch {
           case e: Exception => finalException = Some(e)
         }
 
+        //对driver的退出状态做一些处理
         val state =
           if (killed) {
             DriverState.KILLED
@@ -100,6 +113,7 @@ private[spark] class DriverRunner(
 
         finalState = Some(state)
 
+        //这个DriverRunner这个线程，向它所属的worker的actor，发送一个DriverStateChanged的事件
         worker ! DriverStateChanged(driverId, state, finalException)
       }
     }.start()
@@ -129,23 +143,33 @@ private[spark] class DriverRunner(
    * Download the user jar into the supplied directory and return its local path.
    * Will throw an exception if there are errors downloading the jar.
    */
+
+  /**
+   *将用户jar包下载到提供的目录中（之前创建的driver的工作目录），并返回它在worker本地的路径
+   *如果下载的jar包的过程中出现了任何异常，那么会抛出exception异常
+   */
   private def downloadUserJar(driverDir: File): String = {
-
+    //用hadoop jar里的Path
     val jarPath = new Path(driverDesc.jarUrl)
-
+    //拿到了hadoop配置
     val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
+    //获取了HDFS的FileSystem
     val jarFileSystem = jarPath.getFileSystem(hadoopConf)
 
+    //创建本地目录
     val destPath = new File(driverDir.getAbsolutePath, jarPath.getName)
     val jarFileName = jarPath.getName
     val localJarFile = new File(driverDir, jarFileName)
     val localJarFilename = localJarFile.getAbsolutePath
 
+    //如果jar在本地不存在
     if (!localJarFile.exists()) { // May already exist if running multiple workers on one node
       logInfo(s"Copying user jar $jarPath to $destPath")
+      //用FileUtil将jar拷贝到本地
       FileUtil.copy(jarFileSystem, jarPath, destPath, false, hadoopConf)
     }
 
+    //如果拷贝完了，发现jar还是不在，那么就抛出异常
     if (!localJarFile.exists()) { // Verify copy succeeded
       throw new Exception(s"Did not see expected jar $jarFileName in $driverDir")
     }
@@ -157,6 +181,7 @@ private[spark] class DriverRunner(
     builder.directory(baseDir)
     def initialize(process: Process) = {
       // Redirect stdout and stderr to files
+      //重定向stdout和stderr输出流到文件中
       val stdout = new File(baseDir, "stdout")
       CommandUtils.redirectStream(process.getInputStream, stdout)
 

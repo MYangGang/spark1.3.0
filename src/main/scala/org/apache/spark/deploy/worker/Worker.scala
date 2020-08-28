@@ -339,6 +339,8 @@ private[spark] class Worker(
           logInfo("Asked to launch executor %s/%d for %s".format(appId, execId, appDesc.name))
 
           // Create the executor's working directory
+
+          //创建executor的本地工作目录
           val executorDir = new File(workDir, appId + "/" + execId)
           if (!executorDir.mkdirs()) {
             throw new IOException("Failed to create directory " + executorDir)
@@ -353,6 +355,8 @@ private[spark] class Worker(
             }.toSeq
           }
           appDirectories(appId) = appLocalDirs
+
+          //创建ExecutorRunner
           val manager = new ExecutorRunner(
             appId,
             execId,
@@ -369,10 +373,14 @@ private[spark] class Worker(
             akkaUrl,
             conf,
             appLocalDirs, ExecutorState.LOADING)
+          //把executor加入本地缓存
           executors(appId + "/" + execId) = manager
+          //启动ExecutorRunner
           manager.start()
+          //加上executor要使用的资源
           coresUsed += cores_
           memoryUsed += memory_
+          //向master返回一个ExecutorStateChanged消息
           master ! ExecutorStateChanged(appId, execId, manager.state, None, None)
         } catch {
           case e: Exception => {
@@ -388,16 +396,22 @@ private[spark] class Worker(
       }
 
     case ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
+      //直接向master也发送一个ExecutorStateChanged消息
       master ! ExecutorStateChanged(appId, execId, state, message, exitStatus)
       val fullId = appId + "/" + execId
+
+      //如果executor状态时finished
       if (ExecutorState.isFinished(state)) {
         executors.get(fullId) match {
           case Some(executor) =>
             logInfo("Executor " + fullId + " finished with state " + state +
               message.map(" message " + _).getOrElse("") +
               exitStatus.map(" exitStatus " + _).getOrElse(""))
+            //将executor从内存缓存中移除
             executors -= fullId
             finishedExecutors(fullId) = executor
+
+            //释放executor占用的内存和cpu资源
             coresUsed -= executor.cores
             memoryUsed -= executor.memory
           case None =>
@@ -462,9 +476,15 @@ private[spark] class Worker(
         case _ =>
           logDebug(s"Driver $driverId changed state to $state")
       }
+      //driver执行完以后，DriverRunner线程会发送一个状态给woker
+      //然后worker实际上会将DriverStateChanged消息发送给master，master会进行状态改变的处理
       master ! DriverStateChanged(driverId, state, exception)
+
+      //将driver从本地缓存移除
       val driver = drivers.remove(driverId).get
+      //将driver加入完成的driver的队列
       finishedDrivers(driverId) = driver
+      //将driver的内存和cpu释放
       memoryUsed -= driver.driverDesc.mem
       coresUsed -= driver.driverDesc.cores
     }
