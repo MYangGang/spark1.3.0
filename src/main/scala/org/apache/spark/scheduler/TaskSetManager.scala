@@ -33,6 +33,13 @@ import org.apache.spark.TaskState.TaskState
 import org.apache.spark.util.{Clock, SystemClock, Utils}
 
 /**
+  * 在TaskSchedulerImpl中，对一个单独的TaskSet的任务进行调度。这个类负责追踪每一个task，如果task失败的话，
+  * 会负责重试task，直到超过重试的次数限制，并且会通过延迟调度，为这个TaskSet处理本地化调度机制。它的主要
+  * 接口是resourceOffer，在这个接口中，TaskSet会希望在一个节点上去运行一个任务，并且接受任务的状态改变消息，
+  * 来知道它负责的Task的状态改变了。
+  */
+
+/**
  * Schedules the tasks within a single TaskSet in the TaskSchedulerImpl. This class keeps track of
  * each task, retries tasks if they fail (up to a limited number of times), and
  * handles locality-aware scheduling for this TaskSet via delay scheduling. The main interfaces
@@ -420,6 +427,13 @@ private[spark] class TaskSetManager(
    * @param host  the host Id of the offered resource
    * @param maxLocality the maximum locality we want to schedule the tasks at
    */
+
+  /**
+    *这个方法，大致的意思
+    * 就是说，会去判断这个executor在这个本地化级别，之前等待的时间是多少
+    * 如果说，本地化级别的等待时间在一定范围之内，那么就认为task使用本地化级别可以在executor上启动
+    */
+
   @throws[TaskNotSerializableException]
   def resourceOffer(
       execId: String,

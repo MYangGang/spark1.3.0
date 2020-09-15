@@ -105,6 +105,10 @@ class FileShuffleBlockManager(conf: SparkConf)
    * Get a ShuffleWriterGroup for the given map task, which will register it as complete
    * when the writers are closed successfully
    */
+
+  /**
+    * 给每个map task获取一个ShuffleWriterGroup
+    */
   def forMapTask(shuffleId: Int, mapId: Int, numBuckets: Int, serializer: Serializer,
       writeMetrics: ShuffleWriteMetrics) = {
     new ShuffleWriterGroup {
@@ -112,19 +116,31 @@ class FileShuffleBlockManager(conf: SparkConf)
       private val shuffleState = shuffleStates(shuffleId)
       private var fileGroup: ShuffleFileGroup = null
 
+      //这里会判断，如果开启了consolidation机制，也就是consolidateShuffleFiles为true
+      //那么不会给，每个bucket都获取一个独立的文件
+      //而是为这个bucket，获取一个ShuffleGroup的Writer
       val writers: Array[BlockObjectWriter] = if (consolidateShuffleFiles) {
         fileGroup = getUnusedFileGroup()
         Array.tabulate[BlockObjectWriter](numBuckets) { bucketId =>
+          //首先，用shuffleId、mapId、bucketId(reduceId)生成一个唯一的ShuffleBlockId
+          //然后用bucketId，来调用ShuffleFileGroup的apply()方法，来为bucket获取一个ShuffleFileGroup
           val blockId = ShuffleBlockId(shuffleId, mapId, bucketId)
+          //然后用BlockManager的getDiskWriter()方法，针对ShuffleFileGroup获取一个Writer
+          //这样就实现了ShuffleMapTask输出数据的合并
           blockManager.getDiskWriter(blockId, fileGroup(bucketId), serializer, bufferSize,
             writeMetrics)
         }
       } else {
+        //如果没有开启cosolidation机制
         Array.tabulate[BlockObjectWriter](numBuckets) { bucketId =>
+          //同样生成一个ShuffleBlockId
           val blockId = ShuffleBlockId(shuffleId, mapId, bucketId)
+          //然后调用BlockManager的DiskBlockManager的getFile()方法，获取一个代表了
+          //要写入本地磁盘文件的blockFile
           val blockFile = blockManager.diskBlockManager.getFile(blockId)
           // Because of previous failures, the shuffle file may already exist on this machine.
           // If so, remove it.
+          //判断这个blockFile文件，是否存在，存在的话，就删除它
           if (blockFile.exists) {
             if (blockFile.delete()) {
               logInfo(s"Removed existing shuffle file $blockFile")
@@ -132,8 +148,11 @@ class FileShuffleBlockManager(conf: SparkConf)
               logWarning(s"Failed to remove existing shuffle file $blockFile")
             }
           }
+          //然后调用BlockManager的getDiskWriter()方法，针对那个blockFile文件生成Writer
           blockManager.getDiskWriter(blockId, blockFile, serializer, bufferSize, writeMetrics)
         }
+        //所以使用这种普通的Shuffle操作的话
+        //对应每一个ShuffleMapTask输出的bucket，都会在本地获取一个单独的ShuffleBlockFile
       }
 
       override def releaseWriters(success: Boolean) {

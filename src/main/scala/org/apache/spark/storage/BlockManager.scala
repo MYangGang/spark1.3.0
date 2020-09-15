@@ -613,6 +613,9 @@ private[spark] class BlockManager(
   /**
    * Get a block from the block manager (either local or remote).
    */
+  //通过BlockManager获取数据的入口方法
+  //获取的时候，优先从本地获取，如果本地没有，那么就从远程获取
+  //如果都没有获取，则返回None
   def get(blockId: BlockId): Option[BlockResult] = {
     val local = getLocal(blockId)
     if (local.isDefined) {

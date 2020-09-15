@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -161,11 +161,18 @@ private[spark] class TaskSchedulerImpl(
     waitBackendReady()
   }
 
+  /**
+    * TaskScheduler提交任务的入口
+    * @param taskSet
+    */
   override def submitTasks(taskSet: TaskSet) {
     val tasks = taskSet.tasks
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
     this.synchronized {
+      //给每一个TaskSet，都会创建一个TaskSetManager
+      //TaskSetManager实际上，在后面，会负责它的那个TaskSet的任务执行状况的监视和管理
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
+      //然后加入内存缓存中
       activeTaskSets(taskSet.id) = manager
       schedulableBuilder.addTaskSetManager(manager, manager.taskSet.properties)
 
@@ -184,6 +191,10 @@ private[spark] class TaskSchedulerImpl(
       }
       hasReceivedTask = true
     }
+
+    //SparkContext的原理剖析时，创建TaskScheduler时，为TaskSchedulerImpl创建SparkDeploySchedulerBackend
+    //这里的backend，指的就是之前创建好的SparkDeploySchedulerBackend
+    //而且这个backend是负责创建AppClient，想Master注册Application的
     backend.reviveOffers()
   }
 
@@ -231,13 +242,27 @@ private[spark] class TaskSchedulerImpl(
       availableCpus: Array[Int],
       tasks: Seq[ArrayBuffer[TaskDescription]]) : Boolean = {
     var launchedTask = false
+
+    //遍历所有的executor
     for (i <- 0 until shuffledOffers.size) {
       val execId = shuffledOffers(i).executorId
       val host = shuffledOffers(i).host
+
+      //如果当前executor的cpu数量至少大于每个task要使用的cpu数量，默认是1
       if (availableCpus(i) >= CPUS_PER_TASK) {
         try {
+
+          //调用TaskSetManager的reosourceOffer()方法，
+          //去找到，在这个executor上，就用这种本地化级别，taskset哪些task可以启动
+          //遍历，使用当前本地化级别，可以在该executor上启动的task
           for (task <- taskSet.resourceOffer(execId, host, maxLocality)) {
+            //放入tasks这个二维数组，给指定的executor加上要启动的task
             tasks(i) += task
+            //到这里为止，task的分配算法，其实就算实现了
+            //我们尝试着用本地化级别这种模式，去优化task的分配和启动，优先希望在最佳本地化的地方启动task
+            //然后，将task分配给executor
+
+            //将相应的分配信息加入内存缓存
             val tid = task.taskId
             taskIdToTaskSetId(tid) = taskSet.taskSet.id
             taskIdToExecutorId(tid) = execId
@@ -281,10 +306,21 @@ private[spark] class TaskSchedulerImpl(
     }
 
     // Randomly shuffle offers to avoid always placing tasks on the same set of workers.
+    //首先，将可用的executor进行shuffle，也就是说进行打散，从而做到，尽量可以进行负载均衡
     val shuffledOffers = Random.shuffle(offers)
     // Build a list of tasks to assign to each worker.
+
+    //然后针对WorkerOffer，创建出一堆需要用的东西
+    //比如tasks，很重要，可以理解为一个二维数组，ArrayBuffer，元素又是一个ArrayBuffer
+    //并且每个子ArrayBuffer的元素数量是固定的，也就是这个executor可用的cpu数量
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
+
+    //这个很重要，从rootPool中取出了排序的TaskSet
+    //之前TaskScheduler初始化的时候，先创建完TaskSchedulerImpl和SparkDeploySchedulerBackend之后，
+    //执行一个initialize()方法，在这个方法中，其实会创建一个调度池
+    //这里，相当是说，所有提交的TaskSet，首先，会放入这个调度池
+    //然后在执行task分配算法时候，会从这个调度池中，取出排好对的TaskSet
     val sortedTaskSets = rootPool.getSortedTaskSetQueue
     for (taskSet <- sortedTaskSets) {
       logDebug("parentName: %s, name: %s, runningTasks: %s".format(
@@ -297,9 +333,24 @@ private[spark] class TaskSchedulerImpl(
     // Take each TaskSet in our scheduling order, and then offer it each node in increasing order
     // of locality levels so that it gets a chance to launch local tasks on all of them.
     // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
+
+    //这里，就是任务分配算法的核心了
+    //双重for循环，遍历所有的taskSet，以及每一种本地化级别
+
+    //本地化级别，有几种：PROCESS_LOCAL，进程本地化，rdd的partition和task，进入一个executor内，那么速度当然快了
+    //NODE_LOCAL，节点本地化，rdd的partition和task，在一个worker节点上
+    //NO_PREF，没有所谓的本地化级别
+    //RACK_LOCAL，机架本地化，至少rdd的partition和task，在一个机架上
+    //ANY，任意的本地化级别
+
+    //对每个taskSet，从最好的一种本地化级别，开始遍历
     var launchedTask = false
     for (taskSet <- sortedTaskSets; maxLocality <- taskSet.myLocalityLevels) {
       do {
+        //对当前taskSet
+        //尝试优先使用最小的本地化级别，将taskSet的task，在executor上进行启动
+        //如果启动不了，那么就跳出这个do while循环，进入下一种本地化级别，也就是放大本地化级别
+        //以此类推，直到尝试将taskSet在某些本地化级别下，让task在executor上全部启动
         launchedTask = resourceOfferSingleTaskSet(
             taskSet, maxLocality, shuffledOffers, availableCpus, tasks)
       } while (launchedTask)
@@ -315,6 +366,9 @@ private[spark] class TaskSchedulerImpl(
     var failedExecutor: Option[String] = None
     synchronized {
       try {
+        //判断如果task是lost了，大家在实际编写spark应用程序的时候，可能会经常发现task lost了
+        //这个时候，就是因为各种各样的原因，执行失败了
+        //这里就会移除executor，将它加入失败队列
         if (state == TaskState.LOST && taskIdToExecutorId.contains(tid)) {
           // We lost this entire executor, so remember that it's gone
           val execId = taskIdToExecutorId(tid)
@@ -324,11 +378,14 @@ private[spark] class TaskSchedulerImpl(
           }
         }
         taskIdToTaskSetId.get(tid) match {
+          //获取对应的taskSet
           case Some(taskSetId) =>
+            //如果task结束了，从内存缓存中移除
             if (TaskState.isFinished(state)) {
               taskIdToTaskSetId.remove(tid)
               taskIdToExecutorId.remove(tid)
             }
+            //如果正常结束，那么也做相应的处理
             activeTaskSets.get(taskSetId).foreach { taskSet =>
               if (state == TaskState.FINISHED) {
                 taskSet.removeRunningTask(tid)

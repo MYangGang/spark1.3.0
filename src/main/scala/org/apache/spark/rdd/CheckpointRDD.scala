@@ -70,6 +70,8 @@ class CheckpointRDD[T: ClassTag](sc: SparkContext, val checkpointPath: String)
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[T] = {
+    //使用hadoop的api Path，创建了一个，比如，针对hdfs文件的路径
+    //然后用checkpointRDD的readFromFile()，来读取hdfs文件中的数据
     val file = new Path(checkpointPath, CheckpointRDD.splitIdToFile(split.index))
     CheckpointRDD.readFromFile(file, broadcastedConf, context)
   }
@@ -134,6 +136,10 @@ private[spark] object CheckpointRDD extends Logging {
       broadcastedConf: Broadcast[SerializableWritable[Configuration]],
       context: TaskContext
     ): Iterator[T] = {
+    //这里调用了hdfs的api，FileSystem
+    //调用FileSystem的open()方法，打开针对hdfs文件的输入流
+    //然后对输入流进行了反序列化流的一个包装
+    //最后使用了deserializeStream的asIterator方法读取了数据
     val env = SparkEnv.get
     val fs = path.getFileSystem(broadcastedConf.value.value)
     val bufferSize = env.conf.getInt("spark.buffer.size", 65536)

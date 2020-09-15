@@ -52,6 +52,9 @@ private[spark] abstract class Task[T](val stageId: Int, var partitionId: Int) ex
    * @return the result of the task
    */
   final def run(taskAttemptId: Long, attemptNumber: Int): T = {
+    //创建了一个TaskContext，就是task的执行上下文
+    //里面记录了task执行的一些全局性的数据
+    //比如说，task属于哪一个stage，task要处理的是rdd的哪个partition，task重试了几次等等
     context = new TaskContextImpl(stageId = stageId, partitionId = partitionId,
       taskAttemptId = taskAttemptId, attemptNumber = attemptNumber, runningLocally = false)
     TaskContextHelper.setTaskContext(context)
@@ -61,6 +64,7 @@ private[spark] abstract class Task[T](val stageId: Int, var partitionId: Int) ex
       kill(interruptThread = false)
     }
     try {
+      //调用抽象方法，runTask()
       runTask(context)
     } finally {
       context.markTaskCompleted()
@@ -68,6 +72,14 @@ private[spark] abstract class Task[T](val stageId: Int, var partitionId: Int) ex
     }
   }
 
+  /**
+    * 出现了抽象方法，那就意味着
+    * 这个类，只是一个模板类，或者抽象父类
+    * 仅仅封装了一些子类通用的数据和操作
+    * 而关键的操作，全部都要依赖子类的实现
+    * Task的子类，有哪些实现？
+    * ShuffleMapTask、ResultTask,要运行它们的runTask（）方法，才能执行我们自己定义的算子和逻辑
+    */
   def runTask(context: TaskContext): T
 
   def preferredLocations: Seq[TaskLocation] = Nil

@@ -37,6 +37,10 @@ private[spark] class HashShuffleReader[K, C](
   /** Read the combined key-values for this reduce task */
   override def read(): Iterator[Product2[K, C]] = {
     val ser = Serializer.getSerializer(dep.serializer)
+    //ResultTask在拉取数据时
+    //首先了，会用BlockStoreShuffleFetcher的fetch()方法，来从driver上的DAGScheduler的MapOutPutTrackerMaster
+    //中获取自己想要的数据信息
+    //然后底层，再通过BlockManager从对应的位置，拉取需要的数据
     val iter = BlockStoreShuffleFetcher.fetch(handle.shuffleId, startPartition, context, ser)
 
     val aggregatedIter: Iterator[Product2[K, C]] = if (dep.aggregator.isDefined) {

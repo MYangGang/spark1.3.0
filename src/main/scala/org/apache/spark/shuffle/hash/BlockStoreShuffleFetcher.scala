@@ -39,10 +39,23 @@ private[hash] object BlockStoreShuffleFetcher extends Logging {
     val blockManager = SparkEnv.get.blockManager
 
     val startTime = System.currentTimeMillis
+
+    //拿到了一个全局的MapOutputTrackerMaster的引用
+    //然后调用getServerStatuses()方法，传入参数shuffleId和reduceId
+    //shuffleId可以代表当前这个stage的上一个stage，我们知道shuffle是分为两个stage的
+    //shuffle write发生在上一个stage中，shuffle read是发生在当前的stage中
+    //这么来理解
+    //首先通过shuffleId可以限制到上一个stage的所有ShuffleMapTask的输出的MapStatus
+    //接着，通过reduceId，也就是bucketId，来限制，从每个MapStatus中，来获取当前这个ResultTask需要
+    //获取的每个ShuffleMapTask的输出文件的信息
+    //这个getServerStatuses()方法，一定是走远程网络通信的，因为要联系Driver上的DAGScheduler的
+    // MapOutputTrackerMaster
     val statuses = SparkEnv.get.mapOutputTracker.getServerStatuses(shuffleId, reduceId)
     logDebug("Fetching map output location for shuffle %d, reduce %d took %d ms".format(
       shuffleId, reduceId, System.currentTimeMillis - startTime))
 
+    //对刚才拉取到的信息，statuses，进行一些数据结构上的转换操作
+    //弄成map格式的数据
     val splitsByAddress = new HashMap[BlockManagerId, ArrayBuffer[(Int, Long)]]
     for (((address, size), index) <- statuses.zipWithIndex) {
       splitsByAddress.getOrElseUpdate(address, ArrayBuffer()) += ((index, size))
@@ -73,6 +86,8 @@ private[hash] object BlockStoreShuffleFetcher extends Logging {
       }
     }
 
+    //ShuffleBlockFetcherIterator构造以后，在其内部，就直接根据拉取到的地理位置信息，通过BlockManager
+    //去远程的ShuffleMapTask所在节点的blockManager去拉取数据
     val blockFetcherItr = new ShuffleBlockFetcherIterator(
       context,
       SparkEnv.get.blockManager.shuffleClient,
@@ -82,6 +97,8 @@ private[hash] object BlockStoreShuffleFetcher extends Logging {
       SparkEnv.get.conf.getLong("spark.reducer.maxMbInFlight", 48) * 1024 * 1024)
     val itr = blockFetcherItr.flatMap(unpackBlock)
 
+    //最后，将拉取到的数据，进行一些转换和封装
+    //返回
     val completionIter = CompletionIterator[T, Iterator[T]](itr, {
       context.taskMetrics.updateShuffleReadMetrics()
     })
